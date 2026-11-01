@@ -1,0 +1,883 @@
+# Study Timetable Planner - Complete Mini Project
+
+This document contains the complete, ready-to-run source code and setup guide for the **Study Timetable Planner** mini-project built using Python Flask, HTML5, CSS3, JavaScript, and SQLite.
+
+---
+
+## 📁 Project Directory Structure
+
+Create a folder named `study_planner` and structure your project files as follows:
+
+```text
+study_planner/
+│
+├── app.py
+├── schema.sql
+├── static/
+│   ├── css/
+│   │   └── style.css
+│   └── js/
+│       └── app.js
+└── templates/
+    └── index.html
+```
+
+---
+
+## 1. Database Schema (`schema.sql`)
+
+```sql
+CREATE TABLE IF NOT EXISTS subjects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    duration INTEGER NOT NULL DEFAULT 60,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS timetable (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    day TEXT NOT NULL,
+    subject_id INTEGER NOT NULL,
+    start_time TEXT NOT NULL,
+    end_time TEXT NOT NULL,
+    is_completed INTEGER DEFAULT 0,
+    FOREIGN KEY (subject_id) REFERENCES subjects (id) ON DELETE CASCADE
+);
+```
+
+---
+
+## 2. Flask Backend Application (`app.py`)
+
+```python
+import sqlite3
+from flask import Flask, render_template, request, jsonify
+
+app = Flask(__name__)
+DATABASE = 'timetable_planner.db'
+
+def get_db():
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    with app.app_context():
+        db = get_db()
+        with open('schema.sql', mode='r') as f:
+            db.cursor().executescript(f.read())
+        db.commit()
+
+# --- Page Route ---
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+# --- Dashboard API ---
+@app.route('/api/dashboard', methods=['GET'])
+def get_dashboard_stats():
+    db = get_db()
+    total_subjects = db.execute("SELECT COUNT(*) FROM subjects").fetchone()[0]
+    total_sessions = db.execute("SELECT COUNT(*) FROM timetable").fetchone()[0]
+    completed_sessions = db.execute("SELECT COUNT(*) FROM timetable WHERE is_completed = 1").fetchone()[0]
+    
+    return jsonify({
+        "total_subjects": total_subjects,
+        "total_sessions": total_sessions,
+        "completed_sessions": completed_sessions
+    })
+
+# --- Subject APIs ---
+@app.route('/api/subjects', methods=['GET', 'POST'])
+def manage_subjects():
+    db = get_db()
+    if request.method == 'GET':
+        subjects = db.execute("SELECT * FROM subjects ORDER BY name ASC").fetchall()
+        return jsonify([dict(s) for s in subjects])
+    
+    elif request.method == 'POST':
+        data = request.get_json()
+        name = data.get('name', '').strip()
+        duration = data.get('duration', 60)
+        
+        if not name:
+            return jsonify({"error": "Subject name is required."}), 400
+        
+        try:
+            db.execute("INSERT INTO subjects (name, duration) VALUES (?, ?)", (name, duration))
+            db.commit()
+            return jsonify({"message": "Subject added successfully!"}), 201
+        except sqlite3.IntegrityError:
+            return jsonify({"error": "Subject already exists."}), 400
+
+@app.route('/api/subjects/<int:subject_id>', methods=['DELETE'])
+def delete_subject(subject_id):
+    db = get_db()
+    db.execute("DELETE FROM subjects WHERE id = ?", (subject_id,))
+    db.commit()
+    return jsonify({"message": "Subject deleted successfully!"})
+
+# --- Timetable APIs ---
+@app.route('/api/timetable', methods=['GET', 'POST'])
+def manage_timetable():
+    db = get_db()
+    if request.method == 'GET':
+        query = """
+            SELECT t.id, t.day, t.start_time, t.end_time, t.is_completed, t.subject_id, s.name as subject_name
+            FROM timetable t
+            JOIN subjects s ON t.subject_id = s.id
+            ORDER BY CASE 
+                WHEN t.day = 'Monday' THEN 1
+                WHEN t.day = 'Tuesday' THEN 2
+                WHEN t.day = 'Wednesday' THEN 3
+                WHEN t.day = 'Thursday' THEN 4
+                WHEN t.day = 'Friday' THEN 5
+                WHEN t.day = 'Saturday' THEN 6
+                WHEN t.day = 'Sunday' THEN 7
+            END, t.start_time ASC
+        """
+        entries = db.execute(query).fetchall()
+        return jsonify([dict(e) for e in entries])
+    
+    elif request.method == 'POST':
+        data = request.get_json()
+        day = data.get('day')
+        subject_id = data.get('subject_id')
+        start_time = data.get('start_time')
+        end_time = data.get('end_time')
+        
+        if not all([day, subject_id, start_time, end_time]):
+            return jsonify({"error": "All fields are required."}), 400
+            
+        if start_time >= end_time:
+            return jsonify({"error": "End time must be later than start time."}), 400
+        
+        db.execute(
+            "INSERT INTO timetable (day, subject_id, start_time, end_time) VALUES (?, ?, ?, ?)",
+            (day, subject_id, start_time, end_time)
+        )
+        db.commit()
+        return jsonify({"message": "Session scheduled successfully!"}), 201
+
+@app.route('/api/timetable/<int:entry_id>', methods=['PUT', 'DELETE'])
+def update_delete_timetable(entry_id):
+    db = get_db()
+    if request.method == 'DELETE':
+        db.execute("DELETE FROM timetable WHERE id = ?", (entry_id,))
+        db.commit()
+        return jsonify({"message": "Schedule entry deleted!"})
+    
+    elif request.method == 'PUT':
+        data = request.get_json()
+        if 'is_completed' in data:
+            db.execute("UPDATE timetable SET is_completed = ? WHERE id = ?", (int(data['is_completed']), entry_id))
+        else:
+            day = data.get('day')
+            subject_id = data.get('subject_id')
+            start_time = data.get('start_time')
+            end_time = data.get('end_time')
+            
+            if start_time >= end_time:
+                return jsonify({"error": "End time must be later than start time."}), 400
+                
+            db.execute(
+                "UPDATE timetable SET day = ?, subject_id = ?, start_time = ?, end_time = ? WHERE id = ?",
+                (day, subject_id, start_time, end_time, entry_id)
+            )
+        db.commit()
+        return jsonify({"message": "Entry updated successfully!"})
+
+if __name__ == '__main__':
+    init_db()
+    app.run(debug=True, port=5000)
+```
+
+---
+
+## 3. Single-Page Template (`templates/index.html`)
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Study Timetable Planner</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+
+    <!-- Navigation Bar -->
+    <nav class="navbar">
+        <div class="nav-container">
+            <div class="brand"><i class="fa-solid fa-graduation-cap"></i> StudyPlan</div>
+            <ul class="nav-links">
+                <li><a href="#home" class="active"><i class="fa-solid fa-house"></i> Home</a></li>
+                <li><a href="#dashboard"><i class="fa-solid fa-chart-pie"></i> Dashboard</a></li>
+                <li><a href="#subjects"><i class="fa-solid fa-book"></i> Subjects</a></li>
+                <li><a href="#schedule"><i class="fa-solid fa-calendar-plus"></i> Schedule</a></li>
+                <li><a href="#timetable"><i class="fa-solid fa-table"></i> Weekly View</a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <div class="container">
+        <!-- Toast Notification -->
+        <div id="toast" class="toast hidden"></div>
+
+        <!-- Section 1: Hero / Home -->
+        <section id="home" class="card hero-card">
+            <div class="hero-content">
+                <h1>Master Your Daily Study Schedule</h1>
+                <p>Organize subjects, track your completed sessions, and achieve your academic goals effortlessly.</p>
+                <a href="#schedule" class="btn btn-primary btn-lg"><i class="fa-solid fa-bolt"></i> Get Started</a>
+            </div>
+        </section>
+
+        <!-- Section 2: Dashboard -->
+        <section id="dashboard" class="dashboard-section">
+            <h2><i class="fa-solid fa-chart-pie"></i> Dashboard Overview</h2>
+            <div class="grid grid-3">
+                <div class="card stat-card blue">
+                    <i class="fa-solid fa-book-open icon"></i>
+                    <div>
+                        <h3 id="stat-subjects">0</h3>
+                        <p>Total Subjects</p>
+                    </div>
+                </div>
+                <div class="card stat-card purple">
+                    <i class="fa-solid fa-clock icon"></i>
+                    <div>
+                        <h3 id="stat-sessions">0</h3>
+                        <p>Planned Sessions</p>
+                    </div>
+                </div>
+                <div class="card stat-card green">
+                    <i class="fa-solid fa-circle-check icon"></i>
+                    <div>
+                        <h3 id="stat-completed">0</h3>
+                        <p>Completed Sessions</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 3: Manage Subjects & Schedule Side-by-Side -->
+        <div class="grid grid-2">
+            <!-- Add Subject -->
+            <section id="subjects" class="card">
+                <h2><i class="fa-solid fa-book"></i> Add New Subject</h2>
+                <form id="subject-form">
+                    <div class="form-group">
+                        <label for="sub-name">Subject Name</label>
+                        <input type="text" id="sub-name" placeholder="e.g., Mathematics, Physics" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="sub-duration">Default Duration (mins)</label>
+                        <input type="number" id="sub-duration" value="60" min="15" step="15" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary"><i class="fa-solid fa-plus"></i> Add Subject</button>
+                </form>
+
+                <h3 class="sub-heading">Existing Subjects</h3>
+                <ul id="subject-list" class="item-list"></ul>
+            </section>
+
+            <!-- Schedule Session -->
+            <section id="schedule" class="card">
+                <h2><i class="fa-solid fa-calendar-plus"></i> Schedule Session</h2>
+                <form id="schedule-form">
+                    <input type="hidden" id="edit-id" value="">
+                    <div class="form-group">
+                        <label for="sched-day">Day of Week</label>
+                        <select id="sched-day" required>
+                            <option value="Monday">Monday</option>
+                            <option value="Tuesday">Tuesday</option>
+                            <option value="Wednesday">Wednesday</option>
+                            <option value="Thursday">Thursday</option>
+                            <option value="Friday">Friday</option>
+                            <option value="Saturday">Saturday</option>
+                            <option value="Sunday">Sunday</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="sched-subject">Select Subject</label>
+                        <select id="sched-subject" required>
+                            <option value="">-- Choose Subject --</option>
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="sched-start">Start Time</label>
+                            <input type="time" id="sched-start" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="sched-end">End Time</label>
+                            <input type="time" id="sched-end" required>
+                        </div>
+                    </div>
+                    <div class="btn-group">
+                        <button type="submit" id="submit-sched-btn" class="btn btn-secondary"><i class="fa-solid fa-calendar-check"></i> Add Session</button>
+                        <button type="button" id="cancel-edit-btn" class="btn btn-outline hidden">Cancel</button>
+                    </div>
+                </form>
+            </section>
+        </div>
+
+        <!-- Section 4: Weekly Timetable View -->
+        <section id="timetable" class="card">
+            <h2><i class="fa-solid fa-table"></i> Weekly Timetable</h2>
+            <div class="table-responsive">
+                <table class="timetable">
+                    <thead>
+                        <tr>
+                            <th>Status</th>
+                            <th>Day</th>
+                            <th>Subject</th>
+                            <th>Time Window</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="timetable-rows">
+                        <!-- Entries populated dynamically -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
+```
+
+---
+
+## 4. Modern Stylesheet (`static/css/style.css`)
+
+```css
+:root {
+    --bg-color: #f4f7fe;
+    --card-bg: #ffffff;
+    --primary: #4f46e5;
+    --primary-hover: #4338ca;
+    --secondary: #7c3aed;
+    --accent-blue: #3b82f6;
+    --accent-green: #10b981;
+    --danger: #ef4444;
+    --text-main: #1f2937;
+    --text-muted: #6b7280;
+    --border: #e5e7eb;
+    --radius: 12px;
+    --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    font-family: 'Inter', sans-serif;
+}
+
+body {
+    background-color: var(--bg-color);
+    color: var(--text-main);
+    line-height: 1.6;
+    padding-bottom: 40px;
+}
+
+/* Navigation */
+.navbar {
+    background: var(--card-bg);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+}
+
+.nav-container {
+    max-width: 1200px;
+    margin: 0 auto;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 2rem;
+}
+
+.brand {
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--primary);
+}
+
+.nav-links {
+    display: flex;
+    list-style: none;
+    gap: 1.5rem;
+}
+
+.nav-links a {
+    text-decoration: none;
+    color: var(--text-muted);
+    font-weight: 500;
+    transition: color 0.2s;
+}
+
+.nav-links a:hover, .nav-links a.active {
+    color: var(--primary);
+}
+
+/* Layout */
+.container {
+    max-width: 1200px;
+    margin: 2rem auto;
+    padding: 0 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+}
+
+.grid {
+    display: grid;
+    gap: 1.5rem;
+}
+
+.grid-2 { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.grid-3 { grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
+
+/* Cards */
+.card {
+    background: var(--card-bg);
+    border-radius: var(--radius);
+    padding: 1.5rem;
+    box-shadow: var(--shadow);
+    border: 1px solid var(--border);
+}
+
+.hero-card {
+    background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+    color: white;
+    text-align: center;
+    padding: 3.5rem 2rem;
+}
+
+.hero-card p {
+    margin: 1rem 0 1.5rem;
+    font-size: 1.1rem;
+    opacity: 0.9;
+}
+
+/* Dashboard Cards */
+.stat-card {
+    display: flex;
+    align-items: center;
+    gap: 1.25rem;
+}
+
+.stat-card .icon {
+    font-size: 2rem;
+    padding: 1rem;
+    border-radius: 10px;
+    color: white;
+}
+
+.stat-card.blue .icon { background: var(--accent-blue); }
+.stat-card.purple .icon { background: var(--secondary); }
+.stat-card.green .icon { background: var(--accent-green); }
+
+.stat-card h3 { font-size: 1.8rem; font-weight: 700; }
+.stat-card p { color: var(--text-muted); font-size: 0.9rem; }
+
+/* Forms & Inputs */
+h2 {
+    font-size: 1.25rem;
+    margin-bottom: 1.25rem;
+    color: var(--text-main);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.form-group {
+    margin-bottom: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+}
+
+label {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--text-muted);
+}
+
+input, select {
+    padding: 0.65rem 0.85rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 0.95rem;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+input:focus, select:focus {
+    border-color: var(--primary);
+}
+
+/* Buttons */
+.btn {
+    padding: 0.65rem 1.2rem;
+    border: none;
+    border-radius: 8px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    text-decoration: none;
+}
+
+.btn-primary { background: var(--primary); color: white; }
+.btn-primary:hover { background: var(--primary-hover); }
+
+.btn-secondary { background: var(--secondary); color: white; }
+.btn-secondary:hover { opacity: 0.9; }
+
+.btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text-main); }
+.btn-outline:hover { background: #f3f4f6; }
+
+.btn-lg { padding: 0.85rem 1.75rem; font-size: 1rem; }
+
+.btn-group { display: flex; gap: 0.5rem; }
+
+/* Lists & Tables */
+.sub-heading { margin-top: 1.5rem; margin-bottom: 0.75rem; font-size: 1rem; }
+
+.item-list {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    max-height: 180px;
+    overflow-y: auto;
+}
+
+.item-list li {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0.75rem;
+    background: #f9fafb;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+}
+
+.btn-icon {
+    background: none;
+    border: none;
+    color: var(--danger);
+    cursor: pointer;
+    font-size: 0.9rem;
+}
+
+.table-responsive { overflow-x: auto; }
+
+.timetable {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
+}
+
+.timetable th, .timetable td {
+    padding: 0.85rem 1rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.timetable th {
+    background-color: #f9fafb;
+    color: var(--text-muted);
+    font-weight: 600;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+}
+
+.completed-row {
+    background-color: #f0fdf4;
+}
+
+.completed-row td {
+    text-decoration: line-through;
+    color: var(--text-muted);
+}
+
+/* Toast */
+.toast {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    padding: 0.85rem 1.5rem;
+    border-radius: 8px;
+    color: white;
+    font-weight: 500;
+    box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);
+    z-index: 1000;
+    transition: opacity 0.3s ease;
+}
+
+.toast.success { background: var(--accent-green); }
+.toast.error { background: var(--danger); }
+.toast.hidden { display: none; }
+
+@media (max-width: 640px) {
+    .nav-container { flex-direction: column; gap: 0.5rem; }
+    .form-row { grid-template-columns: 1fr; }
+}
+```
+
+---
+
+## 5. Client Logic (`static/js/app.js`)
+
+```javascript
+document.addEventListener('DOMContentLoaded', () => {
+    // API Endpoints
+    const API_DASHBOARD = '/api/dashboard';
+    const API_SUBJECTS = '/api/subjects';
+    const API_TIMETABLE = '/api/timetable';
+
+    // DOM Elements
+    const subjectForm = document.getElementById('subject-form');
+    const scheduleForm = document.getElementById('schedule-form');
+    const subjectList = document.getElementById('subject-list');
+    const subjectSelect = document.getElementById('sched-subject');
+    const timetableRows = document.getElementById('timetable-rows');
+    const editIdInput = document.getElementById('edit-id');
+    const submitSchedBtn = document.getElementById('submit-sched-btn');
+    const cancelEditBtn = document.getElementById('cancel-edit-btn');
+    const toast = document.getElementById('toast');
+
+    // Initial Data Fetch
+    refreshAll();
+
+    function refreshAll() {
+        fetchDashboardStats();
+        fetchSubjects();
+        fetchTimetable();
+    }
+
+    // --- Toast Notification Helper ---
+    function showToast(message, type = 'success') {
+        toast.textContent = message;
+        toast.className = `toast ${type}`;
+        setTimeout(() => {
+            toast.className = 'toast hidden';
+        }, 3000);
+    }
+
+    // --- Fetch Dashboard Stats ---
+    function fetchDashboardStats() {
+        fetch(API_DASHBOARD)
+            .then(res => res.json())
+            .then(data => {
+                document.getElementById('stat-subjects').textContent = data.total_subjects;
+                document.getElementById('stat-sessions').textContent = data.total_sessions;
+                document.getElementById('stat-completed').textContent = data.completed_sessions;
+            });
+    }
+
+    // --- Subject Operations ---
+    function fetchSubjects() {
+        fetch(API_SUBJECTS)
+            .then(res => res.json())
+            .then(data => {
+                // Populate List
+                subjectList.innerHTML = '';
+                subjectSelect.innerHTML = '<option value="">-- Choose Subject --</option>';
+
+                data.forEach(sub => {
+                    // List Item
+                    const li = document.createElement('li');
+                    li.innerHTML = `
+                        <span><strong>${sub.name}</strong> (${sub.duration} mins)</span>
+                        <button class="btn-icon" onclick="deleteSubject(${sub.id})"><i class="fa-solid fa-trash"></i></button>
+                    `;
+                    subjectList.appendChild(li);
+
+                    // Select Option
+                    const option = document.createElement('option');
+                    option.value = sub.id;
+                    option.textContent = sub.name;
+                    subjectSelect.appendChild(option);
+                });
+            });
+    }
+
+    subjectForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const name = document.getElementById('sub-name').value;
+        const duration = document.getElementById('sub-duration').value;
+
+        fetch(API_SUBJECTS, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, duration })
+        })
+        .then(res => res.json().then(data => ({ status: res.status, body: data })))
+        .then(res => {
+            if (res.status === 201) {
+                showToast(res.body.message, 'success');
+                subjectForm.reset();
+                refreshAll();
+            } else {
+                showToast(res.body.error, 'error');
+            }
+        });
+    });
+
+    window.deleteSubject = function(id) {
+        if (!confirm('Are you sure? This will remove scheduled sessions for this subject too.')) return;
+
+        fetch(`${API_SUBJECTS}/${id}`, { method: 'DELETE' })
+            .then(res => res.json())
+            .then(data => {
+                showToast(data.message, 'success');
+                refreshAll();
+            });
+    };
+
+    // --- Timetable Operations ---
+    function fetchTimetable() {
+        fetch(API_TIMETABLE)
+            .then(res => res.json())
+            .then(data => {
+                timetableRows.innerHTML = '';
+                if (data.length === 0) {
+                    timetableRows.innerHTML = `<tr><td colspan="5" style="text-align: center; color: var(--text-muted);">No study sessions scheduled yet.</td></tr>`;
+                    return;
+                }
+
+                data.forEach(entry => {
+                    const tr = document.createElement('tr');
+                    if (entry.is_completed) tr.classList.add('completed-row');
+
+                    tr.innerHTML = `
+                        <td>
+                            <input type="checkbox" ${entry.is_completed ? 'checked' : ''} onchange="toggleComplete(${entry.id}, this.checked)">
+                        </td>
+                        <td><strong>${entry.day}</strong></td>
+                        <td>${entry.subject_name}</td>
+                        <td>${entry.start_time} - ${entry.end_time}</td>
+                        <td>
+                            <button class="btn-icon" style="color: var(--primary); margin-right: 8px;" onclick="editSession(${JSON.stringify(entry).replace(/"/g, '&quot;')})"><i class="fa-solid fa-pen-to-square"></i></button>
+                            <button class="btn-icon" onclick="deleteSession(${entry.id})"><i class="fa-solid fa-trash"></i></button>
+                        </td>
+                    `;
+                    timetableRows.appendChild(tr);
+                });
+            });
+    }
+
+    scheduleForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const editId = editIdInput.value;
+        const payload = {
+            day: document.getElementById('sched-day').value,
+            subject_id: document.getElementById('sched-subject').value,
+            start_time: document.getElementById('sched-start').value,
+            end_time: document.getElementById('sched-end').value
+        };
+
+        const url = editId ? `${API_TIMETABLE}/${editId}` : API_TIMETABLE;
+        const method = editId ? 'PUT' : 'POST';
+
+        fetch(url, {
+            method: method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        })
+        .then(res => res.json().then(data => ({ status: res.status, body: data })))
+        .then(res => {
+            if (res.status === 200 || res.status === 201) {
+                showToast(res.body.message, 'success');
+                resetScheduleForm();
+                refreshAll();
+            } else {
+                showToast(res.body.error, 'error');
+            }
+        });
+    });
+
+    window.toggleComplete = function(id, isCompleted) {
+        fetch(`${API_TIMETABLE}/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ is_completed: isCompleted ? 1 : 0 })
+        })
+        .then(() => fetchDashboardStats());
+    };
+
+    window.editSession = function(entry) {
+        editIdInput.value = entry.id;
+        document.getElementById('sched-day').value = entry.day;
+        document.getElementById('sched-subject').value = entry.subject_id;
+        document.getElementById('sched-start').value = entry.start_time;
+        document.getElementById('sched-end').value = entry.end_time;
+
+        submitSchedBtn.innerHTML = '<i class="fa-solid fa-rotate"></i> Update Session';
+        cancelEditBtn.classList.remove('hidden');
+    };
+
+    cancelEditBtn.addEventListener('click', resetScheduleForm);
+
+    function resetScheduleForm() {
+        editIdInput.value = '';
+        scheduleForm.reset();
+        submitSchedBtn.innerHTML = '<i class="fa-solid fa-calendar-check"></i> Add Session';
+        cancelEditBtn.classList.add('hidden');
+    }
+
+    window.deleteSession = function(id) {
+        if (!confirm('Remove this session from your timetable?')) return;
+
+        fetch(`${API_TIMETABLE}/${id}`, { method: 'DELETE' })
+            .then(res => res.json())
+            .then(data => {
+                showToast(data.message, 'success');
+                refreshAll();
+            });
+    };
+});
+```
+
+---
+
+## 🚀 How to Run the Project Locally
+
+### Step 1: Install Dependencies
+Make sure Python 3.x is installed on your computer. Open your terminal or command prompt and install Flask:
+```bash
+pip install flask
+```
+
+### Step 2: Initialize Database and Start Application
+Navigate into the `study_planner` directory and execute:
+```bash
+python app.py
+```
+
+### Step 3: Access the Web Application
+Open your web browser and navigate to:
+```text
+http://127.0.0.1:5000/
+```
